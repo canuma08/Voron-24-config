@@ -1,0 +1,71 @@
+[server]
+host = 0.0.0.0
+port = 7125
+klippy_uds_address = /tmp/klippy_uds
+max_upload_size = 1024
+
+[database]
+
+[authorization]
+trusted_clients = 
+	192.168.1.0/24
+cors_domains = 
+	http://*://app.fluidd.xyz
+force_logins = False
+default_source = moonraker
+
+[file_manager]
+queue_gcode_uploads = TRUE
+enable_object_processing = TRUE
+enable_inotify_warnings = TRUE
+
+[octoprint_compat]
+enable_ufp = True
+
+[history]
+
+[update_manager]
+enable_auto_refresh = False
+refresh_interval = 672
+enable_system_updates = True
+enable_packagekit = True
+channel = dev
+
+[update_manager mainsail]
+type = web
+repo = mainsail-crew/mainsail
+path = ~/mainsail
+
+[update_manager fluidd]
+type = web
+repo = fluidd-core/fluidd
+path = ~/fluidd
+
+[update_manager client z_calibration]
+type = git_repo
+path = ~/klipper_z_calibration
+origin = https://github.com/protoloft/klipper_z_calibration.git
+install_script = install.sh
+managed_services = klipper
+
+[update_manager crowsnest]
+type = git_repo
+path = ~/crowsnest
+origin = https://github.com/mainsail-crew/crowsnest.git
+install_script = tools/install.sh
+
+[machine]
+provider = systemd_dbus
+sudo_password = Worldperk@67
+validate_service = TRUE
+validate_config = TRUE
+force_validation = FALSE
+
+[data_store]
+temperature_store_size = 1200
+gcode_store_size = 1000
+
+[announcements]
+subscriptions = 
+dev_mode = False
+
