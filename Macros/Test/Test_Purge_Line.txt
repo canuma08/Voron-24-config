@@ -1,0 +1,54 @@
+[gcode_macro PURGE_LINE_TEST]
+description: Extrude a purge line at 0,0,.35. Perams: NONE
+variable_feed: 10
+
+gcode:
+    SAVE_GCODE_STATE NAME=BASE_TEST_PURGE_LINE
+    # Parameters
+    {% set count = params.COUNT|default(1)|int %}
+	{% set step = params.COUNT|default(1)|int %}
+	{% set length = params.LENGTH|default(200)|int %}
+	{% set speed = params.SPEED|default(1000)|int %}
+	{% set feed = params.FEED|default(0)|int %}
+	{% set feed_max = params.FEED|default(0.64)|float %}
+	{% set x = params.X|default(5)|int %}
+	{% set y = params.Y|default(5)|int %}
+
+    {action_respond_info("Running Purge line...")}
+
+	SET_GCODE_VARIABLE MACRO=PURGE_LINE VARIABLE=feed VALUE={feed + length * 0.64 / 2.4052 / 2}
+
+	#M118 Purge count= {count}
+	#M118 Purge length= {length}
+	#M118 Purge speed= {speed} 
+	#M118 Purge feed= {feed}
+	M118 Purge E= {length * 0.64 / 2.4052 / 2}
+	
+    G90                 											; Absolute coordinates.
+    M83                 											; Relative extruder mode.
+    G92 E0															; set extruder to 0
+	G1 X2 Y2 F7800                                              	; move to purge strip start position
+	G1 Z0.4 F7800                                              		; drop to 0.4 print height
+	G1 E6.0 F300													; Spew a small puddle - cleans gunk
+	G1 X{x} Y{y} F7800												; move to purge line 1 start position
+	G1 Z0.25 F7800													; drop to 0.25 print height
+
+	{% for step in range(count|int) %}
+		M118 Line = {step + 1}
+		#M118 Y target = {y + step * 2}
+		#M118 X target = {x + length / 2}		
+ 		G1 Y{y + step * 2}
+		G1 X{x + length / 2} E{feed} F{speed}                      ; purge forward
+		#G1 X{x + length / 2} F{speed}
+		#M118 Y target = {y + step * 2 + 1}
+		#M118 X target = {x}	
+ 		G1 Y{y + step * 2 + 1}
+ 		G1 X{x} Y{y + step * 2 + 1} E{feed} F{speed}				; purge backward
+		#G1 X{x} Y{y + step * 2 + 1} F{speed}	
+	{% endfor %}
+
+	G1 Z25 F7800
+	G1 E-1 F1500                                                 	; Retract some after purge line
+    G92 E0.0                                                     	; reset extruder distance position
+    RESTORE_GCODE_STATE NAME=BASE_TEST_PURGE_LINE  
+    {action_respond_info("leaving Purge line...")}
