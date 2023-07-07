@@ -1,0 +1,413 @@
+#####################################################################
+# 	Bed Heater Thermistor
+#####################################################################
+##[heater_bed]
+##heater_pin: PA1
+##sensor_type: NTC 100K MGB18-104F39050L32
+##sensor_pin: PF3
+##max_power: 0.6
+##min_temp: -273.15
+##max_temp: 120
+##control: pid
+##pid_kp: 58.437
+##pid_ki: 2.347
+##pid_kd: 363.769
+
+#####################################################################
+# 	Bedfans
+#####################################################################
+##[fan_generic BedFans]
+####	Bed Fan - FAN3
+##pin: PD13
+##cycle_time: 0.1
+##kick_start_time: 0.5
+##shutdown_speed: 0
+
+#####################################################################
+# 	Chamber Thermistor
+#####################################################################
+##[thermistor chamber_temp]
+##temperature1: 25
+##resistance1: 10000
+##beta: 3950
+
+##[temperature_sensor chamber]
+##sensor_type: chamber_temp
+##sensor_pin: PF4
+##min_temp: -273.15
+##max_temp: 75
+##gcode_id: C
+
+
+
+############### Config options ##################
+[gcode_macro _BEDFANVARS]
+variable_threshold: 30		# If bed temp target is above this threshold, fans will be enabled. If temp is set to below this threshold, fans will be disabled.
+variable_bed_target: 90
+variable_bed: 0
+variable_chamber_target: 38
+variable_chamber: 0
+variable_chamber_status_ready:0
+variable_bedfan_status: 0 # 1: Initial chamber heatup to target 3: chamber temp monitoring
+variable_bedfans_fast_status: 0
+variable_bedfan_start_loop_status: 0
+variable_bedfan_initial_chamber_temp_heating_status: 0
+variable_bedfan_chamber_temp_control_loop_status: 0
+
+gcode:
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+    {% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+
+	SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=chamber_status_ready VALUE=0
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_status VALUE=0
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_start_loop_status VALUE=0
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_initial_chamber_temp_heating_status VALUE=0
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_chamber_temp_control_loop_status VALUE=0
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfans_fast_status VALUE=0
+
+	M118 BEDFANVARS bed_target={bed_target} chamber_target={chamber_target}
+	M118 BEDFANVARS chamber_target={chamber_target}
+	M118 BEDFANVARS bedfan_status={printer["gcode_macro _BEDFANVARS"].bedfan_status}
+
+
+[gcode_macro M140]
+rename_existing: M99140
+gcode:
+	# Parameters
+	{% set S = params.S|float %}
+	_BEDFANVARS
+	#M118 M140 S: {S}
+	SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={S}
+	M118 M140 BED: {printer["gcode_macro PRINT_START"].bed} CHAMBER: {printer["gcode_macro PRINT_START"].chamber} dT: {printer["gcode_macro PRINT_START"].bedfans_start_dt}
+
+[gcode_macro SET_HEATER_TEMPERATURE]										# Override, set fan speeds to low and start monitoring loop.
+rename_existing: _SET_HEATER_TEMPERATURE
+gcode:
+	# Parameters
+	{% set chamber = printer['temperature_sensor chamber'].temperature %}
+	{% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set bed = printer.heater_bed.temperature|float %}
+	{% set HEATER = params.HEATER|default("None") %}
+	{% set TARGET = params.TARGET|default(0)|int %}
+	# Vars
+	{% set THRESHOLD = printer["gcode_macro _BEDFANVARS"].threshold|int %}
+
+	{% if HEATER|lower == "extruder" %}
+		M118 BEDFANS,SET_EXTRUDER_TEMPERATURE call M104 S{TARGET}
+		M104 S{TARGET}
+	{% elif HEATER|lower == "heater_bed" %}
+		{% if TARGET != 0 %}
+			M99140 S{TARGET}
+		{% else %}
+			M99140 S0
+		{% endif %}	
+	{% else %}
+		{action_respond_info("Heater %s not supported" % HEATER)}
+	{% endif %}
+
+	# Set fans to low if heater_bed temp is requested above threshold temp, and kick off monitoring loop.
+	{% if HEATER|lower == "heater_bed" %}
+		{% if TARGET >= THRESHOLD %}
+			M118 LOOPS
+			_Counter_Init
+			#M118 SET_HEATER_TEMPERATURE: bed {bed_target} chamber: {chamber_target} 
+			#M118 SET_HEATER_TEMPERATURE: bed {bed} chamber: {chamber}
+			M118 SET_HEATER_TEMPERATURE BED: {printer["gcode_macro PRINT_START"].bed} CHAMBER: {printer["gcode_macro PRINT_START"].chamber} dT: {printer["gcode_macro PRINT_START"].bedfans_start_dt}
+#			UPDATE_DELAYED_GCODE ID=bedfan_monitor_loop DURATION=1
+#			UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=5
+#			BEDFANS_WARMUP
+			UPDATE_DELAYED_GCODE ID=bedfanloop DURATION=1
+
+		{% else %}
+			BEDFANSOFF
+			UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=0 #	Cancel bed fan loop if it's running
+			UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=0
+			UPDATE_DELAYED_GCODE ID=chamber_temp_control_loop DURATION=0
+			#M140 S111
+		{% endif %}
+	{% endif %}
+	
+
+################ Monitoring loop #####################
+
+[delayed_gcode bedfan_start_loop]												# Turns bed fans to "fast" speed once target bed temp is reached.
+gcode:
+	# Vars
+#	M118 bedfan_start_loop	
+
+#	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_start_loop_status VALUE=1
+	
+	{% set bed = printer.heater_bed.temperature|float %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set chamber = printer['temperature_sensor chamber'].temperature %}
+	{% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set dT = printer["gcode_macro PRINT_START"].bedfans_start_dt|float %}
+
+#	{% set bed_target = 85 %}
+#	{% set chamber_target = 25 %}
+
+#	M118 dT: {dT}	
+#	M118 bedfan_start_loop: bed_target {bed_target} chamber_target: {chamber_target}
+#	M118 bedfan_start_loop: Bed {bed} Chamber: {chamber}
+#	M118 bedfan_start_loop: Bed {bed} Bed-dT: {bed-dT}
+	
+
+	{% if chamber_target > 0 and bed_target > 0 %} 								# Continue only if target bed is on
+		{% if bed >= (bed_target - dT) and chamber < chamber_target %}
+			BEDFANS_HEATFAST
+			#UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=0
+			#UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=10
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfans_fast_status VALUE=1
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_start_loop_status VALUE=2
+			UPDATE_DELAYED_GCODE ID=bedfan_monitor_loop DURATION=0
+		{% elif bed < bed_target %}
+			BEDFANS_WARMUP
+#			M118 Bed Heating, Act:{bed}, Target:{bed_target}
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_status VALUE=1
+			UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=5
+#		{% elif chamber > chamber_target %}
+#			M118 Chamber, Act:{chamber} > Target:{chamber_target}
+#			#UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=0
+#			UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=10
+#			SET_FAN_SPEED FAN=BedFans SPEED=0.09
+		{% endif %}	
+	{% else %}	
+		BEDFANSOFF
+		UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=0
+		SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_start_loop_status VALUE=2
+	{% endif %}	
+
+[delayed_gcode bedfanloop]
+gcode:
+	# Vars
+	{% set bed = printer.heater_bed.temperature|float %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set chamber = printer['temperature_sensor chamber'].temperature %}
+	{% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set dT = printer["gcode_macro PRINT_START"].bedfans_start_dt|float %}
+	
+	M118 Bed Heating, Act:{bed}, Target:{bed_target}
+#	{% if printer.heater_bed.target >= THRESHOLD %}								# Continue only if target temp greater than threshold.
+		{% if bed >= (bed_target - dT) %}
+			BEDFANS_HEATFAST															# If within 1 degree of target temp: Higher speed fans
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfans_fast_status VALUE=1
+		{% else %}
+			BEDFANS_WARMUP
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_status VALUE=1
+			UPDATE_DELAYED_GCODE ID=bedfanloop DURATION=5						# If temp not reached yet: loop again
+		{% endif %}
+#	{% endif %}
+
+[delayed_gcode initial_chamber_temp_heating]
+gcode:
+	# Vars
+
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_initial_chamber_temp_heating_status VALUE=1
+
+    {% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set chamber = printer['temperature_sensor chamber'].temperature %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set bed = printer.heater_bed.temperature|float %}
+
+	#M118 ChamberTemp Control
+	#M118 Loop, chamber: {chamber}
+	#M118 Loop, chamber_target chamber_target: {chamber_target}
+	
+	{% if chamber_target > 0 and bed_target > 0%}
+		{% if chamber < chamber_target %}
+			#M118 Initial Fast Chamber Heat, Act:{chamber}, Target:{chamber_target}
+			BEDFANS_HEATFAST
+			UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=10
+		{% else %}
+			#M118 Done Initial Heating
+			#M99140 S{printer.heater_bed.target}
+			BEDFANS_HEATSLOW
+			SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=chamber_status_ready VALUE=1
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_status VALUE=3
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_initial_chamber_temp_heating_status VALUE=2
+			UPDATE_DELAYED_GCODE ID=bedfan_monitor_loop DURATION=0
+			#STOP_DELAYED_GCODE
+			#UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=0
+			#UPDATE_DELAYED_GCODE ID=chamber_temp_control_loop DURATION=5
+		{% endif %}
+	{% else %}	
+		BEDFANSOFF
+		SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_initial_chamber_temp_heating_status VALUE=2
+		SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=chamber_status_ready VALUE=0
+	{% endif %}
+	
+[delayed_gcode chamber_temp_control_loop]
+initial_duration: 1
+gcode:
+	# Vars
+    {% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set chamber = printer['temperature_sensor chamber'].temperature %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set bed = printer.heater_bed.temperature|float %}
+	{% set bedfan_status = printer["gcode_macro _BEDFANVARS"].bedfan_status|int %}
+	
+	SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_chamber_temp_control_loop_status VALUE=1
+
+	#{% set bed_target = 62 %}
+	#{% set chamber_target = 25 %}
+
+	#M118 ChamberTemp Control
+	#M118 Loop, chamber: {chamber}
+	#M118 Loop, chamber_target chamber_target: {chamber_target}	
+	
+	UPDATE_DELAYED_GCODE ID=bedfan_start_loop DURATION=0
+	UPDATE_DELAYED_GCODE ID=initial_chamber_temp_heating DURATION=0
+	
+	{% if chamber_target > 0 and bed_target > 0%}
+		SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=chamber_status_ready VALUE=1
+		{% if chamber < chamber_target %}
+			M118 heating
+			BEDFANS_HEATSLOW
+			#M118 count: {printer["gcode_macro _Counter_Init"].count|int}
+			SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=count VALUE={printer["gcode_macro _Counter_Init"].count|int + 1}
+		{% elif chamber > chamber_target %}
+			#SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=cooling_tick VALUE={cooling_tick + 1}
+			M118 cooling
+			BEDFANS_COOLSLOW
+			#M118 count: {printer["gcode_macro _Counter_Init"].count|int}
+			SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=count VALUE={printer["gcode_macro _Counter_Init"].count|int + 1}
+		{% elif bedfan_status == 3 %}
+			UPDATE_DELAYED_GCODE ID=chamber_temp_control_loop DURATION=10
+		{% elif bedfan_status == 1 %}
+			UPDATE_DELAYED_GCODE ID=chamber_temp_control_loop DURATION=0
+			SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=chamber_status_ready VALUE=1
+			SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_chamber_temp_control_loop_status VALUE=2
+		{% endif %}
+	{% else %}	
+		M118 chamber_temp_control_loop: Temp Targets = 0
+		BEDFANSOFF
+		SET_GCODE_VARIABLE MACRO=_BEDFANVARS VARIABLE=bedfan_chamber_temp_control_loop_status VALUE=2
+		#STOP_DELAYED_GCODE
+	{% endif %}
+
+[delayed_gcode bedfan_monitor_loop]
+gcode:
+	# Vars
+	{% set start_loop = printer["gcode_macro _BEDFANVARS"].bedfan_start_loop_status|int %}
+	{% set init_chamber_loop = printer["gcode_macro _BEDFANVARS"].bedfan_initial_chamber_temp_heating_status|int %}		
+	{% set chamber_control_loop = printer["gcode_macro _BEDFANVARS"].bedfan_chamber_temp_control_loop_status|int %}
+	{% set bed = printer.heater_bed.temperature|float %}
+	{% set bed_target = printer["gcode_macro PRINT_START"].bed|int %}
+	{% set chamber = printer['temperature_sensor chamber'].temperature|float %}
+	{% set chamber_target = printer["gcode_macro PRINT_START"].chamber|int %}
+	{% set chamber_status_ready = printer["gcode_macro PRINT_START"].chamber_status_ready|int %}
+	{% set bedfan_status = printer["gcode_macro _BEDFANVARS"].bedfan_status %}
+	{% set bedfans_fast_status = printer["gcode_macro _BEDFANVARS"].bedfans_fast_status %}
+	
+	M118 MONITOR START LOOP: {start_loop} INITIAL_CHAMBER_LOOP: {init_chamber_loop} CHAMBER_CONTROL_LOOP: {chamber_control_loop}
+	M118 MONITOR bedfan_status: {bedfan_status}:{bedfans_fast_status}, chamber_status_ready: {chamber_status_ready}
+	{% if start_loop == 1 %}
+		M118 bedfan_start_loop, Act:{bed}, Target:{bed_target}
+	{% endif %}
+	{% if init_chamber_loop == 1 %}
+		M118 Initial Fast Chamber Heat, Act:{chamber}, Target:{chamber_target}
+	{% endif %}	
+	{% if bedfan_chamber_temp_control_loop_status == 1 %}
+		M118 Temp Control, Act:{chamber}, Target:{chamber_target}
+	{% endif %}	
+	UPDATE_DELAYED_GCODE ID=bedfan_monitor_loop DURATION=5
+
+
+
+
+
+[gcode_macro _Counter_Init]
+variable_cooling_tick: 0		
+variable_heating_tick: 0
+variable_cooling_tick_total: 0
+variable_heating_tick_total: 0
+variable_incr: 1
+variable_count: 12
+
+gcode:
+	SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=cooling_tick VALUE=0
+	SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=heating_tick VALUE=0
+	SET_GCODE_VARIABLE MACRO=_Counter_Init VARIABLE=count VALUE=0
+
+
+[gcode_macro Counter]
+variable_cnt: 1
+
+gcode:
+	_Counter_Init 
+	{% set cnt = printer["gcode_macro _Counter_Init"].count|int + printer["gcode_macro _Counter_Init"].incr|int %}
+	M118 count: {printer["gcode_macro _Counter_Init"].count|int}
+
+
+
+[gcode_macro M190]																# Override M190 (Wait for Bed Temperature)
+rename_existing: M99190															# As a bonus, use TEMPERATURE_WAIT so we don't have to wait for PID to level off.
+gcode:
+
+	# Parameters
+	{% set S = params.S|int %}
+	# Vars
+	{% set THRESHOLD = printer["gcode_macro _BEDFANVARS"].threshold|int %}
+
+	#M118 BEDFANS,M190 chamber= {chamber}
+	M118 BEDFANS M190 {S}
+	{% if S >= THRESHOLD %}
+		BEDFANSSLOW																# >= Threshold temp: Low speed fans while heating
+		#M118 BEDFANS M190 S >= THRESHOLD Fans ON															
+	{% else %}
+		BEDFANSOFF																# < Threshold temp: Turn bed fans off
+		#M118 BEDFANS M190 M190 S < THRESHOLD Fans OFF
+	{% endif %}                                        
+	
+	M140 {% for p in params
+	  %}{'%s%s' % (p, params[p])}{%
+	  endfor %}																	# Set bed temp
+	
+	{% if S != 0 %}
+		M190 S{S}
+		TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={S|int} MAXIMUM={S|int + 5}	# Wait for bed temp within 5 degrees
+	{% endif %}
+
+	# Post-heating fan speeds
+	{% if S >= THRESHOLD %}								    
+		BEDFANSFAST																# >= Threshold temp: Higher speed fans after heating finished
+	{% endif %}
+
+
+########## Aliases #########
+
+[gcode_macro BEDFANS_HEATSLOW]
+gcode:
+	# Vars
+	SET_FAN_SPEED FAN=BedFans SPEED=0.55
+
+[gcode_macro BEDFANS_HEATFAST]
+gcode:
+	# Vars
+	SET_FAN_SPEED FAN=BedFans SPEED=0.9
+	
+[gcode_macro BEDFANS_WARMUP]
+gcode:
+	# Vars
+	SET_FAN_SPEED FAN=BedFans SPEED=0.1	
+
+[gcode_macro BEDFANS_COOLSLOW]
+gcode:
+	# Vars
+	SET_FAN_SPEED FAN=BedFans SPEED=0.1
+
+[gcode_macro BEDFANSOFF]
+gcode:
+	SET_FAN_SPEED FAN=BedFans SPEED=0
+
+############ Command overrides ############
+	
+
+[gcode_macro TURN_OFF_HEATERS]													# Replace TURN_OFF_HEATERS
+rename_existing: _TURN_OFF_HEATERS
+gcode:
+	BEDFANSOFF
+	_TURN_OFF_HEATERS
+
+
